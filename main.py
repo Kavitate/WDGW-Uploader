@@ -1,3 +1,4 @@
+import asyncio
 import discord
 import aiohttp
 import json
@@ -8,6 +9,7 @@ from discord.ui import Button, View
 
 # Load Config
 CONFIG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "log.txt")
 
 with open(CONFIG_FILE, "r") as f:
     config = json.load(f)
@@ -22,11 +24,23 @@ color = 0xBF00FF  # Purple
 WIGLE_TRANSACTIONS_URL = "https://api.wigle.net/api/v2/file/transactions?pagestart=0"
 WIGLE_CSV_URL = "https://api.wigle.net/api/v2/file/csv/{transid}"
 WDGWARS_UPLOAD_URL = "https://wdgwars.pl/api/upload-csv"
-WDGWARS_HISTORY_URL = "https://wdgwars.pl/api/upload-history"
+WDGWARS_LATEST_URL = "https://wdgwars.pl/api/upload-history?limit=1"
 
 intents = discord.Intents.default()
 intents.message_content = True
 
+# Log File
+def is_in_log(transid):
+    if not os.path.exists(LOG_FILE):
+        return False
+    with open(LOG_FILE, "r") as f:
+        return transid in f.read().splitlines()
+
+def add_to_log(transid):
+    with open(LOG_FILE, "a") as f:
+        f.write(f"{transid}\n")
+
+# Bot Setup
 class SyncBot(discord.Client):
     def __init__(self):
         super().__init__(intents=intents)
@@ -39,10 +53,9 @@ class SyncBot(discord.Client):
 class HelpView(View):
     def __init__(self):
         super().__init__(timeout=None)
-
         self.add_item(Button(label="WDGW", style=ButtonStyle.link, url="https://wdgwars.pl"))
         self.add_item(Button(label="WiGLE", style=ButtonStyle.link, url="https://wigle.net"))
-        self.add_item(Button(label="Kavitate",style=ButtonStyle.link,url="https://github.com/kavitate",))
+        self.add_item(Button(label="Kavitate", style=ButtonStyle.link, url="https://github.com/kavitate"))
 
 bot = SyncBot()
 
@@ -51,31 +64,51 @@ async def on_ready():
     print(f"[SYNC] Logged in as {bot.user}")
     print(f"[SYNC] Ready to sync WDGW Uploader by Kavitate")
 
+# Embeds
 def error_embed(title, description):
-    embed = discord.Embed(title=f"{title}", description=description, color=color)
-    return embed
+    return discord.Embed(title=f"{title}", description=description, color=color)
 
-def success_embed(fields):
-    embed = discord.Embed(title="✅ Upload Successful!", color=color)
-    for name, value in fields.items():
-        embed.add_field(name=name, value=value, inline=False)
-    return embed
+def success_embed(lines):
+    description = "\n".join(f"{name} {value}" for name, value in lines)
+    return discord.Embed(title="✅ Upload Successful!", description=description, color=color)
 
 def info_embed(title, description):
-    embed = discord.Embed(title=f"{title}", description=description, color=color)
-    return embed
+    return discord.Embed(title=f"{title}", description=description, color=color)
 
-async def get_wdgwars_history(session):
-    headers = {"X-API-Key": WDGWARS_API_KEY,"User-Agent": "wigle-wdgwars-discord-bot/1.0",}
+# WDGW API
+async def get_wdgwars_latest(session):
+    headers = {"X-API-Key": WDGWARS_API_KEY, "User-Agent": "wigle-wdgwars-discord-bot/1.0"}
     try:
-        async with session.get(WDGWARS_HISTORY_URL, headers=headers) as resp:
+        async with session.get(WDGWARS_LATEST_URL, headers=headers) as resp:
             if resp.status == 200:
                 data = await resp.json()
                 uploads = data.get("uploads", [])
-                return {u.get("filename", "") for u in uploads}
+                if uploads:
+                    return uploads[0]
     except Exception as e:
-        print(f"[SYNC] Warning: couldn't fetch WDGoWars history: {e}")
-    return set()
+        print(f"[SYNC] Warning: couldn't fetch WDGW latest: {e}")
+    return None
+
+def build_stats_lines(transid, wdgw_entry):
+    result = wdgw_entry["result"]
+    wdgw_filename = wdgw_entry.get("filename", "unknown")
+    imported = result.get("imported", 0)
+    captured = result.get("captured", 0)
+    updated = result.get("updated", 0)
+    aircraft_imported = result.get("aircraft_imported", 0)
+    duplicates = result.get("duplicates", 0)
+    total_received = imported + captured + updated + aircraft_imported + duplicates
+
+    return [
+        ("🔑 **Transaction ID:**", f"`{transid}`"),
+        ("📄 **File Name:**", f"`{wdgw_filename}`"),
+        ("📊 **Total Received:**", str(total_received)),
+        ("🆕 **New:**", str(imported)),
+        ("🎯 **Captured:**", str(captured)),
+        ("🔄 **Reinforced:**", str(updated)),
+        ("✈️ **Aircraft Imported:**", str(aircraft_imported)),
+        ("♻️ **Duplicates:**", str(duplicates)),
+    ]
 
 @bot.tree.command(name="sync", description="Pulls the latest WiGLE upload and pushes it to WDGW.")
 async def sync_command(interaction: discord.Interaction):
@@ -83,24 +116,21 @@ async def sync_command(interaction: discord.Interaction):
 
     try:
         async with aiohttp.ClientSession() as session:
-            # Get latest WiGLE Upload ID
-            wigle_headers = {"Authorization": f"Basic {WIGLE_API_TOKEN}","User-Agent": "wigle-wdgwars-discord-bot/1.0",}
+            # Step 1: Fetch latest WiGLE transaction
+            wigle_headers = {"Authorization": f"Basic {WIGLE_API_TOKEN}", "User-Agent": "wigle-wdgwars-discord-bot/1.0"}
 
-            async with session.get(
-                WIGLE_TRANSACTIONS_URL, headers=wigle_headers) as resp:
+            async with session.get(WIGLE_TRANSACTIONS_URL, headers=wigle_headers) as resp:
                 if resp.status == 204:
                     await interaction.followup.send(
-                        embed=info_embed(
-                            "⌛ Still Processing",
-                            "Latest file hasn't finished uploading to WiGLE.\nPlease try again later.",))
+                        embed=info_embed("⌛ Still Processing",
+                            "Latest file hasn't finished uploading to WiGLE.\nPlease try again later."))
                     return
 
                 if resp.status != 200:
                     body = await resp.text()
                     await interaction.followup.send(
-                        embed=error_embed(
-                            "🚫 Upload Failed!",
-                            f"WiGLE transactions API returned HTTP {resp.status}.\n```{body[:200]}```",))
+                        embed=error_embed("🚫 Upload Failed!",
+                            f"WiGLE transactions API returned HTTP {resp.status}.\n```{body[:200]}```"))
                     return
 
                 data = await resp.json()
@@ -111,110 +141,107 @@ async def sync_command(interaction: discord.Interaction):
                     embed=error_embed("🚫 Upload Failed!", "No uploads found on your WiGLE account."))
                 return
 
-            # Check the latest WiGLE upload only
             latest = results[0]
             transid = latest.get("transid")
             filename = latest.get("fileName", "unknown")
-            new_wifi = latest.get("discoveredGps", "?")
-            new_bluetooth = latest.get("btDiscoveredGps", "?")
             wait = latest.get("wait")
 
             if not transid:
                 await interaction.followup.send(
-                    embed=error_embed("🚫 Upload Failed!","Couldn't find a transaction ID in the WiGLE response.",))
+                    embed=error_embed("🚫 Upload Failed!", "Couldn't find a transaction ID in the WiGLE response."))
                 return
 
-            # Check if WiGLE is still processing latest upload
-            if wait is not None:
+            # Step 2: Check if WiGLE is still processing
+            if wait:
                 await interaction.followup.send(
-                    embed=info_embed(
-                        "⌛ Still Processing!",
+                    embed=info_embed("⌛ Still Processing!",
                         f"Latest file hasn't finished uploading to WiGLE.\n"
+                        f"Queue Position: `{wait}`\n"
                         f"Transaction ID: `{transid}`\n"
                         f"File Name: `{filename}`\n\n"
-                        f"Please try again later.",))
+                        f"Please try again later."))
                 return
 
-            # Check if already uploaded to WDGW
-            existing_filenames = await get_wdgwars_history(session)
-            upload_filename = f"{transid}.csv"
-
-            if upload_filename in existing_filenames:
+            # Step 3: Check log for duplicate
+            if is_in_log(transid):
                 await interaction.followup.send(
-                    embed=info_embed(
-                        "📄 Duplicate File",
+                    embed=info_embed("📄 Duplicate File",
                         f"\nWiGLE transaction ID `{transid}` has already been uploaded to WDGW.\n"
-                        f"File Name: `{filename}`",))
+                        f"File Name: `{filename}`"))
                 return
+
+            # Step 4: Log the transaction ID
+            add_to_log(transid)
 
             print(f"[SYNC] Syncing WiGLE upload: {transid} ({filename})")
 
-            # Download CSV from WiGLE
+            # Step 5: Download CSV from WiGLE
             csv_url = WIGLE_CSV_URL.format(transid=transid)
 
             async with session.get(csv_url, headers=wigle_headers) as resp:
                 if resp.status == 204:
                     await interaction.followup.send(
-                        embed=info_embed(
-                            "⌛ Still Processing!",
+                        embed=info_embed("⌛ Still Processing!",
                             f"Latest file hasn't finished uploading to WiGLE.\n"
                             f"Transaction ID: `{transid}`\n"
                             f"File Name: `{filename}`\n\n"
-                            f"Please try again later.",))
+                            f"Please try again later."))
                     return
 
                 if resp.status != 200:
                     body = await resp.text()
                     await interaction.followup.send(
-                        embed=error_embed(
-                            "🚫 Upload Failed!",
-                            f"WiGLE CSV download returned HTTP {resp.status}.\n```{body[:200]}```",))
+                        embed=error_embed("🚫 Upload Failed!",
+                            f"WiGLE CSV download returned HTTP {resp.status}.\n```{body[:200]}```"))
                     return
 
                 csv_data = await resp.read()
 
             if not csv_data:
                 await interaction.followup.send(
-                    embed=error_embed(
-                        "🚫 Upload Failed!", "WiGLE returned an empty CSV file."))
+                    embed=error_embed("🚫 Upload Failed!", "WiGLE returned an empty CSV file."))
                 return
 
             csv_size_kb = len(csv_data) / 1024
             print(f"[SYNC] Downloaded CSV: {csv_size_kb:.1f} KB")
 
-            # Upload CSV to WDGW
-            wdgwars_headers = {"X-API-Key": WDGWARS_API_KEY,"User-Agent": "wigle-wdgwars-discord-bot/1.0",}
+            # Step 6: Upload CSV to WDGW
+            wdgwars_headers = {"X-API-Key": WDGWARS_API_KEY, "User-Agent": "wigle-wdgwars-discord-bot/1.0"}
 
             form = aiohttp.FormData()
             form.add_field("file", csv_data, filename=f"{transid}.csv", content_type="text/csv")
 
-            async with session.post(
-                WDGWARS_UPLOAD_URL, headers=wdgwars_headers, data=form) as resp:
+            async with session.post(WDGWARS_UPLOAD_URL, headers=wdgwars_headers, data=form) as resp:
                 response_text = await resp.text()
 
                 if resp.status in (200, 202):
-                    fields = {
-                        "🔑 Transaction ID": f"`{transid}`",
-                        "📄 File Name": f"`{filename}`",
-                        "📦 File Size": f"{csv_size_kb:.1f} KB",
-                        "📡 New WiFi": str(new_wifi),
-                        "📶 New Bluetooth": str(new_bluetooth),}
+                    # Step 7: Poll WDGW for stats (up to 30s)
+                    expected_filename = f"{transid}.csv"
+                    wdgw_result = None
+                    max_attempts = 6
+                    for attempt in range(max_attempts):
+                        if attempt > 0:
+                            await asyncio.sleep(5)
+                        wdgw_latest = await get_wdgwars_latest(session)
+                        if wdgw_latest and wdgw_latest.get("filename") == expected_filename and wdgw_latest.get("result"):
+                            wdgw_result = wdgw_latest
+                            break
+                        print(f"[SYNC] Waiting for WDGW to process... (attempt {attempt + 1}/{max_attempts})")
 
-                    try:
-                        result = json.loads(response_text)
-                        new_networks = result.get("new", result.get("networks"))
-                        if new_networks is not None:
-                            fields["🌐 WDGoWars New"] = str(new_networks)
-                    except (json.JSONDecodeError, AttributeError):
-                        pass
+                    if wdgw_result:
+                        lines = build_stats_lines(transid, wdgw_result)
+                        await interaction.followup.send(embed=success_embed(lines))
+                    else:
+                        await interaction.followup.send(embed=info_embed(
+                            "⌛ Uploaded — Awaiting Results",
+                            f"File `{transid}.csv` was uploaded to WDGW but is still being processed.\n"
+                            f"Run `/sync` again in a minute to see your stats."))
 
-                    await interaction.followup.send(embed=success_embed(fields))
                     print(f"[SYNC] Upload Successful!: {transid}")
                 else:
                     await interaction.followup.send(
-                        embed=error_embed(
-                            "🚫 Upload Failed!",
-                            f"WDGoWars returned HTTP {resp.status}.\n```{response_text[:300]}```",))
+                        embed=error_embed("🚫 Upload Failed!",
+                            f"WDGW returned HTTP {resp.status}.\n```{response_text[:300]}```"))
                     print(f"[SYNC] Upload failed!: HTTP {resp.status}")
 
     except aiohttp.ClientError as e:
@@ -226,8 +253,7 @@ async def sync_command(interaction: discord.Interaction):
             embed=error_embed("🚫 Upload Failed!", f"Unexpected error: `{e}`"))
         print(f"[SYNC] Error: {e}")
 
-@bot.tree.command(
-    name="help", description="Displays help information for WDGW Uploader.")
+@bot.tree.command(name="help", description="Displays help information for WDGW Uploader.")
 async def help_command(interaction: discord.Interaction):
     await interaction.response.defer(ephemeral=False)
 
@@ -239,9 +265,7 @@ async def help_command(interaction: discord.Interaction):
 
     embed = discord.Embed(title="WDGW Uploader Information", description=help_text, color=color)
     embed.set_footer(text="WDGW Uploader by Kavitate")
-
-    image_url = "https://i.imgur.com/XpcN6uA.png"
-    embed.set_image(url=image_url)
+    embed.set_image(url="https://i.imgur.com/XpcN6uA.png")
 
     view = HelpView()
     await interaction.followup.send(embed=embed, view=view)
