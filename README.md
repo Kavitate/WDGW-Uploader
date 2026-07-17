@@ -1,9 +1,5 @@
 <h1 align="center">:pager::satellite: Watch Dogs Go Wars Discord Bot Uploader :satellite::pager:</h1>
 
-<p align="center">
-  <img src="https://i.imgur.com/XpcN6uA.png">
-</p>
-
 ## Screenshots
 <p float="left">
   <img align="center" src="https://i.imgur.com/ynj72Bq.png"/><br/><br/>
