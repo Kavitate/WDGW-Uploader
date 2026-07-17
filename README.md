@@ -1,11 +1,23 @@
-<h1 align="center">:pager::satellite: Watch Dogs Go Wars Uploader Discord Bot :satellite::pager:</h1>
+<h1 align="center">:pager::satellite: Watch Dogs Go Wars Discord Bot Uploader :satellite::pager:</h1>
 
 <p align="center">
   <img src="https://i.imgur.com/XpcN6uA.png">
 </p>
 
 ## Screenshots
-Coming Soon.
+<p float="left">
+  <img align="center" src="https://i.imgur.com/ynj72Bq.png"/><br/><br/>
+  <img align="center" src="https://i.imgur.com/g1gIzJb.png"/>
+</p>
+
+<p float="left">
+  <img align="center" src="https://i.imgur.com/2LCQ1Cs.png"/><br/><br/>
+  <img align="center" src="https://i.imgur.com/z3tABuV.png"/>
+</p>
+
+<p float="left">
+  <img align="center" src="https://i.imgur.com/Ek8qxLU.png" width="1000" height="300"/>
+</p>
 
 ## Purpose
 A Discord bot that pulls your latest [WiGLE](https://wigle.net/) upload and pushes it to [Watch Dogs Go Wars](https://wdgwars.pl/) using APIs from both sites as shown above.
